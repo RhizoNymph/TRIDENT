@@ -1242,6 +1242,65 @@ class Midnight12kInferenceEncoder(BasePatchEncoder):
                 f"expected return_type to be one of 'cls_token' or 'cls+mean', but got '{self.return_type}'"
             )
 
+
+class OpenMidnightInferenceEncoder(BasePatchEncoder):
+
+    def __init__(self, **build_kwargs):
+        """
+        OpenMidnight initialization by SophontAI.
+        """
+        super().__init__(**build_kwargs)
+
+    def _build(self):        
+        from .utils.constants import IMAGENET_MEAN, IMAGENET_STD
+        from torchvision import transforms
+
+        self.enc_name = "open-midnight"
+        weights_path = self._get_weights_path()
+
+        if weights_path:
+            try:                
+                model = torch.hub.load('facebookresearch/dinov2', 'dinov2_vitg14_reg', weights = None)
+                checkpoint = torch.load(weights_path, map_location = "cpu")
+                pos_embed = checkpoint["pos_embed"]
+                model.pos_embed = torch.nn.parameter.Parameter(pos_embed)
+                model.load_state_dict(checkpoint)
+                model.eval()
+            except:
+                traceback.print_exc()
+                raise Exception(
+                    f"Failed to create OpenMidnight model from local checkpoint at '{weights_path}'. "
+                    "You can download the required `teacher_checkpoint_load.pt` from: https://huggingface.co/SophontAI/OpenMidnight."
+                )
+        else:
+            self.ensure_has_internet(self.enc_name)
+            try:
+                download_location = hf_hub_download(repo_id="SophontAI/OpenMidnight", filename="teacher_checkpoint_load.pt")
+                model = torch.hub.load('facebookresearch/dinov2', 'dinov2_vitg14_reg', weights = None)
+                checkpoint = torch.load(download_location, map_location = "cpu")
+                pos_embed = checkpoint["pos_embed"]
+                model.pos_embed = torch.nn.parameter.Parameter(pos_embed)
+                model.load_state_dict(checkpoint)
+                model.eval()
+            except:
+                traceback.print_exc()
+                raise Exception("Failed to download OpenMidnight model")
+
+        eval_transform = transforms.Compose(
+            [
+                transforms.Resize((224, 224)),
+                transforms.ToTensor(),
+                transforms.Normalize(mean=IMAGENET_MEAN, std=IMAGENET_STD),
+            ]
+        )
+
+        precision = torch.float16
+        return model, eval_transform, precision
+
+    def forward(self, x):        
+        out = self.model(x)
+        return out
+
 encoder_registry = {
     "conch_v1": Conchv1InferenceEncoder,
     "conch_v15": Conchv15InferenceEncoder,
@@ -1265,4 +1324,5 @@ encoder_registry = {
     "kaiko-vitl14": KaikoL14InferenceEncoder,
     "lunit-vits8": LunitS8InferenceEncoder,
     "midnight12k": Midnight12kInferenceEncoder,
+    "open-midnight": OpenMidnightInferenceEncoder,
 }

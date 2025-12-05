@@ -24,6 +24,7 @@ from trident.patch_encoder_models.load import (
     KaikoS8InferenceEncoder,
     KaikoL14InferenceEncoder,
     Midnight12kInferenceEncoder,
+    OpenMidnightInferenceEncoder,
 )
 
 __all__ = [
@@ -52,4 +53,5 @@ __all__ = [
     "KaikoS8InferenceEncoder",
     "KaikoL14InferenceEncoder",
     "Midnight12kInferenceEncoder",
+    "OpenMidnightInferenceEncoder",
 ]
