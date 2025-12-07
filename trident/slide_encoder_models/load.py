@@ -510,6 +510,8 @@ class MeanSlideEncoder(BaseSlideEncoder):
             embedding_dim = 1024
         elif model_name == 'lunit-vits8':
             embedding_dim = 384
+        elif model_name == 'mean-open-midnight':
+            embedding_dim = 1536
         else:
             print(f"\033[93mWARNING: Could not automatically infer embedding_dim for mean encoder {self.enc_name}. Setting to None.\033[0m")
             embedding_dim = None
@@ -552,4 +554,5 @@ encoder_registry = {
     'mean-kaiko-vit8b': MeanSlideEncoder,
     'mean-kaiko-vit16b': MeanSlideEncoder,
     'mean-kaiko-vit14l': MeanSlideEncoder,
+    'mean-open-midnight': MeanSlideEncoder,
 }
