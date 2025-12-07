@@ -1252,6 +1252,7 @@ class OpenMidnightInferenceEncoder(BasePatchEncoder):
         super().__init__(**build_kwargs)
 
     def _build(self):        
+        from huggingface_hub import hf_hub_download
         from .utils.constants import IMAGENET_MEAN, IMAGENET_STD
         from torchvision import transforms
 
