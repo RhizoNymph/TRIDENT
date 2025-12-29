@@ -110,8 +110,24 @@ def build_parser() -> argparse.ArgumentParser:
     parser.add_argument('--slide_encoder', type=str, default=None, 
                         choices=slide_encoder_registry.keys(), 
                         help='Slide encoder to use')
-    parser.add_argument('--feat_batch_size', type=int, default=None, 
+    parser.add_argument('--feat_batch_size', type=int, default=None,
                         help='Batch size for feature extraction. Defaults to None (use `batch_size` argument instead).')
+
+    # VRAM-aware parallelism arguments
+    parser.add_argument('--gpus', type=str, default=None,
+                        help='Comma-separated list of GPU indices for multi-GPU processing (e.g., "0,1,2"). '
+                             'If not specified, uses single GPU from --gpu argument.')
+    parser.add_argument('--auto_batch_size', action='store_true', default=False,
+                        help='Automatically determine optimal batch size based on available VRAM.')
+    parser.add_argument('--vram_safety_margin', type=float, default=0.85,
+                        help='Fraction of available VRAM to use (0.0-1.0). Default: 0.85. '
+                             'Only used when --auto_batch_size is enabled.')
+    parser.add_argument('--multi_gpu_strategy', type=str, default='load_balance',
+                        choices=['load_balance', 'round_robin', 'memory_aware'],
+                        help='Strategy for distributing WSIs across GPUs. '
+                             'load_balance: balance by patch count, '
+                             'round_robin: simple rotation, '
+                             'memory_aware: consider VRAM availability.')
     return parser
 
 
@@ -214,15 +230,24 @@ def run_task(processor: Processor, args: argparse.Namespace) -> None:
             min_tissue_proportion=args.min_tissue_proportion
         )
     elif args.task == 'feat':
-        if args.slide_encoder is None: 
+        if args.slide_encoder is None:
             from trident.patch_encoder_models.load import encoder_factory
             encoder = encoder_factory(args.patch_encoder, weights_path=args.patch_encoder_ckpt_path)
+
+            # Determine batch size (auto or manual)
+            batch_limit = args.feat_batch_size if args.feat_batch_size is not None else args.batch_size
+            if args.auto_batch_size:
+                from trident.VRAMScheduler import VRAMEstimator
+                estimator = VRAMEstimator(encoder, f'cuda:{args.gpu}', args.vram_safety_margin)
+                batch_limit = estimator.get_optimal_batch_size()
+                print(f"[VRAM] Auto-determined batch size: {batch_limit}")
+
             processor.run_patch_feature_extraction_job(
                 coords_dir=args.coords_dir or f'{args.mag}x_{args.patch_size}px_{args.overlap}px_overlap',
                 patch_encoder=encoder,
                 device=f'cuda:{args.gpu}',
                 saveas='h5',
-                batch_limit=args.feat_batch_size if args.feat_batch_size is not None else args.batch_size,
+                batch_limit=batch_limit,
             )
         else:
             from trident.slide_encoder_models.load import encoder_factory
@@ -238,17 +263,118 @@ def run_task(processor: Processor, args: argparse.Namespace) -> None:
         raise ValueError(f'Invalid task: {args.task}')
 
 
+def run_multi_gpu_mode(args: argparse.Namespace, gpu_list: list) -> None:
+    """
+    Run feature extraction across multiple GPUs.
+
+    Parameters
+    ----------
+    args : argparse.Namespace
+        Parsed command-line arguments
+    gpu_list : list
+        List of GPU indices to use
+    """
+    from trident.MultiGPU import run_multi_gpu_feature_extraction
+    from trident.IO import collect_valid_slides
+
+    print(f"[MULTI-GPU] Using GPUs: {gpu_list}")
+    print(f"[MULTI-GPU] Strategy: {args.multi_gpu_strategy}")
+    print(f"[MULTI-GPU] Auto batch size: {args.auto_batch_size}")
+
+    # Collect valid slides
+    valid_slides = collect_valid_slides(
+        wsi_dir=args.wsi_dir,
+        custom_list_path=args.custom_list_of_wsis,
+        wsi_ext=args.wsi_ext,
+        search_nested=args.search_nested,
+        max_workers=args.max_workers
+    )
+    print(f"[MULTI-GPU] Found {len(valid_slides)} valid slides.")
+
+    # Build WSI list as (path, name) tuples
+    wsi_list = [(str(path), path.stem) for path in valid_slides]
+
+    # Build processor config
+    processor_config = {
+        'job_dir': args.job_dir,
+        'skip_errors': args.skip_errors,
+        'custom_mpp_keys': args.custom_mpp_keys,
+        'max_workers': args.max_workers,
+        'reader_type': args.reader_type,
+    }
+
+    # Determine coords directory
+    coords_dir = args.coords_dir or f'{args.mag}x_{args.patch_size}px_{args.overlap}px_overlap'
+
+    # Determine batch size
+    batch_size = args.feat_batch_size if args.feat_batch_size is not None else args.batch_size
+    if args.auto_batch_size:
+        batch_size = None  # Let workers auto-determine
+
+    # Run multi-GPU feature extraction
+    results = run_multi_gpu_feature_extraction(
+        wsi_list=wsi_list,
+        gpus=gpu_list,
+        encoder_name=args.patch_encoder,
+        processor_config=processor_config,
+        coords_dir=coords_dir,
+        encoder_kwargs={'weights_path': args.patch_encoder_ckpt_path} if args.patch_encoder_ckpt_path else {},
+        batch_size=batch_size,
+        auto_batch_size=args.auto_batch_size,
+        safety_margin=args.vram_safety_margin,
+        strategy=args.multi_gpu_strategy,
+    )
+
+    # Report results
+    successful = sum(1 for _, success, _ in results if success)
+    failed = len(results) - successful
+    print(f"\n[MULTI-GPU] Processing complete: {successful} succeeded, {failed} failed")
+
+    if failed > 0:
+        print("[MULTI-GPU] Failed WSIs:")
+        for wsi_name, success, error_msg in results:
+            if not success:
+                print(f"  - {wsi_name}: {error_msg}")
+
+
 def main() -> None:
     """
     Main entry point for the Trident batch processing script.
-    
-    Handles both sequential and parallel processing modes based on whether
-    WSI caching is enabled. Supports segmentation, coordinate extraction,
-    and feature extraction tasks.
+
+    Handles sequential, parallel (cached), and multi-GPU processing modes.
+    Supports segmentation, coordinate extraction, and feature extraction tasks.
     """
 
     args = parse_arguments()
     args.device = f'cuda:{args.gpu}' if torch.cuda.is_available() else 'cpu'
+
+    # Parse multi-GPU configuration
+    if args.gpus:
+        gpu_list = [int(g.strip()) for g in args.gpus.split(',')]
+
+        # Validate GPUs exist
+        available_gpus = torch.cuda.device_count()
+        for gpu in gpu_list:
+            if gpu >= available_gpus:
+                raise ValueError(f"GPU {gpu} not available. Only {available_gpus} GPUs detected.")
+
+        # Multi-GPU mode only supports feature extraction currently
+        if args.task == 'feat':
+            run_multi_gpu_mode(args, gpu_list)
+            return
+        elif args.task == 'all':
+            # For 'all' task, run seg and coords on single GPU, then feat on multi-GPU
+            print("[MULTI-GPU] Running segmentation and patching on single GPU first...")
+            processor = initialize_processor(args)
+            args.task = 'seg'
+            run_task(processor, args)
+            args.task = 'coords'
+            run_task(processor, args)
+            print("[MULTI-GPU] Now running feature extraction across multiple GPUs...")
+            run_multi_gpu_mode(args, gpu_list)
+            return
+        else:
+            print(f"[MULTI-GPU] Warning: Task '{args.task}' does not support multi-GPU. Using single GPU.")
 
     if args.wsi_cache:
         # === Parallel pipeline with caching ===
