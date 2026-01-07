@@ -1261,7 +1261,7 @@ class OpenMidnightInferenceEncoder(BasePatchEncoder):
 
         if weights_path:
             try:                
-                model = torch.hub.load('facebookresearch/dinov2', 'dinov2_vitg14_reg', weights = None)
+                model = torch.hub.load('facebookresearch/dinov2', 'dinov2_vitg14_reg', pretrained = False)
                 checkpoint = torch.load(weights_path, map_location = "cpu")
                 pos_embed = checkpoint["pos_embed"]
                 model.pos_embed = torch.nn.parameter.Parameter(pos_embed)
@@ -1277,7 +1277,7 @@ class OpenMidnightInferenceEncoder(BasePatchEncoder):
             self.ensure_has_internet(self.enc_name)
             try:
                 download_location = hf_hub_download(repo_id="SophontAI/OpenMidnight", filename="teacher_checkpoint_load.pt")
-                model = torch.hub.load('facebookresearch/dinov2', 'dinov2_vitg14_reg', weights = None)
+                model = torch.hub.load('facebookresearch/dinov2', 'dinov2_vitg14_reg', pretrained = False)
                 checkpoint = torch.load(download_location, map_location = "cpu")
                 pos_embed = checkpoint["pos_embed"]
                 model.pos_embed = torch.nn.parameter.Parameter(pos_embed)
