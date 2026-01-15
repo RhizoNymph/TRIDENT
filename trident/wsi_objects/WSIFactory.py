@@ -6,11 +6,13 @@ from trident.wsi_objects.OpenSlideWSI import OpenSlideWSI
 from trident.wsi_objects.ImageWSI import ImageWSI
 from trident.wsi_objects.CuCIMWSI import CuCIMWSI
 from trident.wsi_objects.SDPCWSI import SDPCWSI
+from trident.wsi_objects.CZIWSI import CZIWSI
 
-WSIReaderType = Literal['openslide', 'image', 'cucim', 'sdpc']
+WSIReaderType = Literal['openslide', 'image', 'cucim', 'sdpc', 'czi']
 OPENSLIDE_EXTENSIONS = {'.svs', '.tif', '.tiff', '.ndpi', '.vms', '.vmu', '.scn', '.mrxs'}
 CUCIM_EXTENSIONS = {'.svs', '.tif', '.tiff'}
 SDPC_EXTENSIONS = {'.sdpc'}
+CZI_EXTENSIONS = {'.czi'}
 PIL_EXTENSIONS = {'.png', '.jpg', '.jpeg'}
 
 
@@ -18,19 +20,19 @@ def load_wsi(
     slide_path: str,
     reader_type: Optional[WSIReaderType] = None,
     **kwargs
-) -> Union[OpenSlideWSI, ImageWSI, CuCIMWSI, SDPCWSI]:
+) -> Union[OpenSlideWSI, ImageWSI, CuCIMWSI, SDPCWSI, CZIWSI]:
     """
     Load a whole-slide image (WSI) using the appropriate backend.
 
     By default, uses OpenSlideWSI for OpenSlide-supported file extensions,
-    and ImageWSI for others. Users may override this behavior by explicitly
-    specifying a reader using the `reader_type` argument.
+    CZIWSI for CZI files, and ImageWSI for others. Users may override this
+    behavior by explicitly specifying a reader using the `reader_type` argument.
 
     Parameters
     ----------
     slide_path : str
         Path to the whole-slide image.
-    reader_type : {'openslide', 'image', 'cucim', 'sdpc'}, optional
+    reader_type : {'openslide', 'image', 'cucim', 'sdpc', 'czi'}, optional
         Manually specify the WSI reader to use. If None (default), selection
         is automatic based on file extension.
     **kwargs : dict
@@ -38,7 +40,7 @@ def load_wsi(
 
     Returns
     -------
-    Union[OpenSlideWSI, ImageWSI, CuCIMWSI, SDPCWSI]
+    Union[OpenSlideWSI, ImageWSI, CuCIMWSI, SDPCWSI, CZIWSI]
         An instance of the appropriate WSI reader.
 
     Raises
@@ -50,7 +52,7 @@ def load_wsi(
     """
     ext = os.path.splitext(slide_path)[1].lower()
 
-    assert reader_type in ['openslide', 'image', 'cucim', 'sdpc', None], f"Unknown reader_type: {reader_type}. Choose from 'openslide', 'image', 'cucim', or 'sdpc'."
+    assert reader_type in ['openslide', 'image', 'cucim', 'sdpc', 'czi', None], f"Unknown reader_type: {reader_type}. Choose from 'openslide', 'image', 'cucim', 'sdpc', or 'czi'."
 
     if reader_type == 'openslide':
         return OpenSlideWSI(slide_path=slide_path, **kwargs)
@@ -75,11 +77,22 @@ def load_wsi(
                 f"Unsupported file format '{ext}' for CuCIM. "
                 f"Supported whole-slide image formats are: {', '.join(CUCIM_EXTENSIONS)}."
             )
- 
+
+    elif reader_type == 'czi':
+        if ext in CZI_EXTENSIONS:
+            return CZIWSI(slide_path=slide_path, **kwargs)
+        else:
+            raise ValueError(
+                f"Unsupported file format '{ext}' for CZI reader. "
+                f"Supported formats are: {', '.join(CZI_EXTENSIONS)}."
+            )
+
     elif reader_type is None:
         if ext in OPENSLIDE_EXTENSIONS:
             return OpenSlideWSI(slide_path=slide_path, **kwargs)
         elif ext in SDPC_EXTENSIONS:
             return SDPCWSI(slide_path=slide_path, **kwargs)
+        elif ext in CZI_EXTENSIONS:
+            return CZIWSI(slide_path=slide_path, **kwargs)
         else:
             return ImageWSI(slide_path=slide_path, **kwargs)
