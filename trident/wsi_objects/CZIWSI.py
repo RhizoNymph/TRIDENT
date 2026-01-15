@@ -124,7 +124,7 @@ class CZIWSI(WSI):
         scale = min(scale_x, scale_y)
 
         # Read scaled mosaic
-        mosaic, _ = self._czi.read_mosaic(
+        mosaic = self._czi.read_mosaic(
             region=(self._bbox.x, self._bbox.y, self._bbox.w, self._bbox.h),
             scale_factor=scale,
             C=0
@@ -182,7 +182,7 @@ class CZIWSI(WSI):
         w, h = size
 
         # Read the region
-        mosaic, _ = self._czi.read_mosaic(
+        mosaic = self._czi.read_mosaic(
             region=(x, y, w, h),
             scale_factor=1.0,
             C=0
