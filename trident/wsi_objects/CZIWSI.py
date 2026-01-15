@@ -35,6 +35,7 @@ class CZIWSI(WSI):
             )
 
         self._czi = None
+        self._czi_context = None
         self._bbox = None
         self._bbox_tuple = None  # For pickling
 
@@ -92,7 +93,9 @@ class CZIWSI(WSI):
         """Ensure the CZI file is open."""
         if self._czi is None:
             import pylibCZIrw.czi as pyczi
-            self._czi = pyczi.open_czi(self.slide_path)
+            # open_czi returns a context manager, we need to enter it
+            self._czi_context = pyczi.open_czi(self.slide_path)
+            self._czi = self._czi_context.__enter__()
             # Get bbox if not cached
             if self._bbox_tuple is None:
                 bbox = self._czi.total_bounding_box
@@ -105,12 +108,14 @@ class CZIWSI(WSI):
         state = self.__dict__.copy()
         # Don't pickle the CZI file object
         state['_czi'] = None
+        state['_czi_context'] = None
         return state
 
     def __setstate__(self, state):
         """Restore state after unpickling."""
         self.__dict__.update(state)
         self._czi = None
+        self._czi_context = None
 
     def get_dimensions(self):
         return self.dimensions
@@ -231,9 +236,10 @@ class CZIWSI(WSI):
 
     def close(self):
         """Close the CZI file to free resources."""
-        if self._czi is not None:
+        if self._czi_context is not None:
             try:
-                self._czi.close()
+                self._czi_context.__exit__(None, None, None)
             except:
                 pass
             self._czi = None
+            self._czi_context = None
