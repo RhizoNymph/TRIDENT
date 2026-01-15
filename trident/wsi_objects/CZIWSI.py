@@ -96,8 +96,38 @@ class CZIWSI(WSI):
     def _ensure_czi_open(self):
         """Ensure the CZI file is open."""
         if self._czi is None:
-            self._czi = self._czi_class(self.slide_path)
+            from aicspylibczi import CziFile
+            self._czi = CziFile(self.slide_path)
             self._bbox = self._czi.get_mosaic_bounding_box()
+            # If we have a cached bbox from unpickling, we don't need to re-read
+            if hasattr(self, '_bbox_tuple_cache') and self._bbox_tuple_cache is not None:
+                # bbox is already set above, just clear the cache
+                del self._bbox_tuple_cache
+
+    def __getstate__(self):
+        """Prepare state for pickling - close file handle."""
+        state = self.__dict__.copy()
+        # Don't pickle the CZI file object - it can't be pickled
+        state['_czi'] = None
+        state['_czi_class'] = None
+        # Store bbox as tuple for pickling
+        if self._bbox is not None:
+            state['_bbox_tuple'] = (self._bbox.x, self._bbox.y, self._bbox.w, self._bbox.h)
+        else:
+            state['_bbox_tuple'] = None
+        state['_bbox'] = None
+        return state
+
+    def __setstate__(self, state):
+        """Restore state after unpickling."""
+        bbox_tuple = state.pop('_bbox_tuple', None)
+        self.__dict__.update(state)
+        # Will be reopened on first access via _ensure_czi_open
+        self._czi = None
+        self._czi_class = None
+        self._bbox = None
+        # Store bbox tuple for restoration
+        self._bbox_tuple_cache = bbox_tuple
 
     def get_dimensions(self):
         return self.dimensions
