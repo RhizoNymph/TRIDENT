@@ -1,14 +1,14 @@
 from __future__ import annotations
 import numpy as np
 from PIL import Image
-from typing import List, Tuple, Union, Optional
+from typing import Tuple, Union, Optional
 
 from trident.wsi_objects.WSI import WSI, ReadMode
 
 
 class CZIWSI(WSI):
     """
-    WSI reader for Carl Zeiss CZI files using aicspylibczi.
+    WSI reader for Carl Zeiss CZI files using pylibCZIrw.
     """
 
     def __init__(self, slide_path: str, **kwargs) -> None:
@@ -25,24 +25,18 @@ class CZIWSI(WSI):
             Optional name for the slide.
         lazy_init : bool, default=True
             Whether to defer initialization until the WSI is accessed.
-
-        Examples
-        --------
-        >>> wsi = CZIWSI("path/to/image.czi", lazy_init=False)
-        >>> print(wsi)
-        <width=5120, height=3840, backend=CZIWSI, mpp=0.11, mag=40>
         """
         try:
-            from aicspylibczi import CziFile
+            import pylibCZIrw.czi as pyczi
         except ImportError:
             raise ImportError(
-                "aicspylibczi is required for CZI files. "
-                "Install with: pip install 'aicspylibczi>=3.1.1'"
+                "pylibCZIrw is required for CZI files. "
+                "Install with: pip install pylibCZIrw"
             )
 
         self._czi = None
-        self._czi_class = CziFile
         self._bbox = None
+        self._bbox_tuple = None  # For pickling
 
         # Try to get MPP from kwargs or extract from file
         if kwargs.get("mpp") is None:
@@ -51,7 +45,7 @@ class CZIWSI(WSI):
         super().__init__(slide_path, **kwargs)
 
     def _extract_mpp_from_file(self, slide_path: str) -> Optional[float]:
-        """Extract MPP from CZI file metadata using pylibCZIrw."""
+        """Extract MPP from CZI file metadata."""
         try:
             import pylibCZIrw.czi as pyczi
             with pyczi.open_czi(slide_path) as czi:
@@ -66,9 +60,7 @@ class CZIWSI(WSI):
         return None
 
     def _lazy_initialize(self) -> None:
-        """
-        Lazily initialize the WSI from a CZI file.
-        """
+        """Lazily initialize the WSI from a CZI file."""
         super()._lazy_initialize()
 
         if not self.lazy_init:
@@ -76,10 +68,13 @@ class CZIWSI(WSI):
                 self._ensure_czi_open()
 
                 # Get bounding box for dimensions
-                self._bbox = self._czi.get_mosaic_bounding_box()
+                bbox = self._czi.total_bounding_box
+                self._bbox_tuple = (bbox['X'][0], bbox['Y'][0],
+                                    bbox['X'][1] - bbox['X'][0],
+                                    bbox['Y'][1] - bbox['Y'][0])
 
-                self.width = self._bbox.w
-                self.height = self._bbox.h
+                self.width = self._bbox_tuple[2]
+                self.height = self._bbox_tuple[3]
                 self.dimensions = (self.width, self.height)
 
                 # CZI files are single-level (we read at full resolution)
@@ -96,56 +91,32 @@ class CZIWSI(WSI):
     def _ensure_czi_open(self):
         """Ensure the CZI file is open."""
         if self._czi is None:
-            from aicspylibczi import CziFile
-            self._czi = CziFile(self.slide_path)
-            self._bbox = self._czi.get_mosaic_bounding_box()
-            # If we have a cached bbox from unpickling, we don't need to re-read
-            if hasattr(self, '_bbox_tuple_cache') and self._bbox_tuple_cache is not None:
-                # bbox is already set above, just clear the cache
-                del self._bbox_tuple_cache
+            import pylibCZIrw.czi as pyczi
+            self._czi = pyczi.open_czi(self.slide_path)
+            # Get bbox if not cached
+            if self._bbox_tuple is None:
+                bbox = self._czi.total_bounding_box
+                self._bbox_tuple = (bbox['X'][0], bbox['Y'][0],
+                                    bbox['X'][1] - bbox['X'][0],
+                                    bbox['Y'][1] - bbox['Y'][0])
 
     def __getstate__(self):
         """Prepare state for pickling - close file handle."""
         state = self.__dict__.copy()
-        # Don't pickle the CZI file object - it can't be pickled
+        # Don't pickle the CZI file object
         state['_czi'] = None
-        state['_czi_class'] = None
-        # Store bbox as tuple for pickling
-        if self._bbox is not None:
-            state['_bbox_tuple'] = (self._bbox.x, self._bbox.y, self._bbox.w, self._bbox.h)
-        else:
-            state['_bbox_tuple'] = None
-        state['_bbox'] = None
         return state
 
     def __setstate__(self, state):
         """Restore state after unpickling."""
-        bbox_tuple = state.pop('_bbox_tuple', None)
         self.__dict__.update(state)
-        # Will be reopened on first access via _ensure_czi_open
         self._czi = None
-        self._czi_class = None
-        self._bbox = None
-        # Store bbox tuple for restoration
-        self._bbox_tuple_cache = bbox_tuple
 
     def get_dimensions(self):
         return self.dimensions
 
     def get_thumbnail(self, size: Tuple[int, int]) -> Image.Image:
-        """
-        Generate a thumbnail of the CZI image.
-
-        Parameters
-        ----------
-        size : tuple of int
-            Desired thumbnail size (width, height).
-
-        Returns
-        -------
-        PIL.Image.Image
-            RGB thumbnail image.
-        """
+        """Generate a thumbnail of the CZI image."""
         self._ensure_czi_open()
 
         # Calculate scale factor for thumbnail
@@ -153,27 +124,37 @@ class CZIWSI(WSI):
         scale_y = size[1] / self.height
         scale = min(scale_x, scale_y)
 
-        # Read scaled mosaic
-        mosaic = self._czi.read_mosaic(
-            region=(self._bbox.x, self._bbox.y, self._bbox.w, self._bbox.h),
-            scale_factor=scale,
-            C=0
+        # Read at reduced resolution
+        x, y, w, h = self._bbox_tuple
+        mosaic = self._czi.read(
+            roi=(x, y, w, h),
+            zoom=scale,
+            plane={'C': 0}
         )
 
-        # Convert to PIL Image (mosaic is typically ZCYX or similar)
+        # Convert to PIL Image
+        mosaic = self._convert_to_rgb(mosaic)
+        img = Image.fromarray(mosaic)
+        img.thumbnail(size)
+        return img.convert('RGB')
+
+    def _convert_to_rgb(self, mosaic: np.ndarray) -> np.ndarray:
+        """Convert CZI array format to RGB HWC uint8."""
+        # Handle various array formats from pylibCZIrw
         if mosaic.ndim == 4:
-            mosaic = mosaic[0, :, :, :]  # Remove Z dimension if present
+            mosaic = mosaic[0, :, :, :]  # Remove batch/Z dimension
         if mosaic.ndim == 3 and mosaic.shape[0] in [1, 3, 4]:
             mosaic = np.moveaxis(mosaic, 0, -1)  # CHW -> HWC
 
-        if mosaic.shape[-1] == 1:
+        # Ensure 3 channels
+        if mosaic.ndim == 2:
+            mosaic = np.stack([mosaic, mosaic, mosaic], axis=-1)
+        elif mosaic.shape[-1] == 1:
             mosaic = np.repeat(mosaic, 3, axis=-1)
         elif mosaic.shape[-1] == 4:
             mosaic = mosaic[:, :, :3]  # RGBA -> RGB
 
-        img = Image.fromarray(mosaic.astype(np.uint8))
-        img.thumbnail(size)
-        return img.convert('RGB')
+        return mosaic.astype(np.uint8)
 
     def read_region(
         self,
@@ -182,55 +163,39 @@ class CZIWSI(WSI):
         size: Tuple[int, int],
         read_as: ReadMode = 'pil',
     ) -> Union[Image.Image, np.ndarray]:
-        """
-        Extract a specific region from the CZI file.
-
-        Parameters
-        ----------
-        location : Tuple[int, int]
-            (x, y) coordinates of the top-left corner of the region to extract.
-        level : int
-            Pyramid level to read from. Only level 0 is supported.
-        size : Tuple[int, int]
-            (width, height) of the region to extract.
-        read_as : {'pil', 'numpy'}, optional
-            Output format for the region.
-
-        Returns
-        -------
-        Union[PIL.Image.Image, np.ndarray]
-            Extracted image region.
-        """
+        """Extract a specific region from the CZI file."""
         if level != 0:
             raise ValueError("CZIWSI only supports reading at level=0.")
 
         self._ensure_czi_open()
 
         # Adjust location relative to bounding box origin
-        x = location[0] + self._bbox.x
-        y = location[1] + self._bbox.y
+        bbox_x, bbox_y, _, _ = self._bbox_tuple
+        x = location[0] + bbox_x
+        y = location[1] + bbox_y
         w, h = size
 
-        # Read the region
-        mosaic = self._czi.read_mosaic(
-            region=(x, y, w, h),
-            scale_factor=1.0,
-            C=0
-        )
+        try:
+            # Read the region using pylibCZIrw
+            mosaic = self._czi.read(
+                roi=(x, y, w, h),
+                zoom=1.0,
+                plane={'C': 0}
+            )
+        except RuntimeError as e:
+            # Handle corrupt tiles by returning a blank region
+            if 'WMP_errFail' in str(e) or 'ERR=-1' in str(e):
+                # Return a white/blank tile
+                mosaic = np.ones((h, w, 3), dtype=np.uint8) * 255
+            else:
+                raise
 
-        # Convert array format (ZCYX -> HWC)
-        if mosaic.ndim == 4:
-            mosaic = mosaic[0, :, :, :]  # Remove Z
-        if mosaic.ndim == 3 and mosaic.shape[0] in [1, 3, 4]:
-            mosaic = np.moveaxis(mosaic, 0, -1)  # CHW -> HWC
+        mosaic = self._convert_to_rgb(mosaic)
 
-        # Ensure RGB
-        if mosaic.shape[-1] == 1:
-            mosaic = np.repeat(mosaic, 3, axis=-1)
-        elif mosaic.shape[-1] == 4:
-            mosaic = mosaic[:, :, :3]
-
-        mosaic = mosaic.astype(np.uint8)
+        # Ensure correct size (CZI might return slightly different size)
+        if mosaic.shape[0] != h or mosaic.shape[1] != w:
+            img = Image.fromarray(mosaic).resize((w, h), Image.Resampling.BILINEAR)
+            mosaic = np.array(img)
 
         if read_as == 'pil':
             return Image.fromarray(mosaic).convert('RGB')
@@ -267,4 +232,8 @@ class CZIWSI(WSI):
     def close(self):
         """Close the CZI file to free resources."""
         if self._czi is not None:
+            try:
+                self._czi.close()
+            except:
+                pass
             self._czi = None
